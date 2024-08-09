@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>זיהוי אובייקטים בזמן אמת</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            max-width: 800px;
+            width: 100%;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        #videoContainer {
+            position: relative;
+            width: 100%;
+            max-width: 640px;
+            margin: 0 auto;
+        }
+        #video, #canvas {
+            width: 100%;
+            height: auto;
+        }
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        #detectionsList {
+            width: 100%;
+            max-height: 200px;
+            overflow-y: auto;
+            background-color: #fff;
+            border: 1px solid #ccc;
+            padding: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            font-family: Arial, sans-serif;
+            line-height: 1.5;
+        }
+        #detectionsList div {
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        #detectionsList div:last-child {
+            border-bottom: none;
+        }
+        #controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        #history {
+            max-height: 200px;
+            overflow-y: auto;
+            background-color: #fff;
+            border: 1px solid #ccc;
+            padding: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        button, select {
+            padding: 10px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="videoContainer">
+            <video id="video" autoplay muted></video>
+            <canvas id="canvas"></canvas>
+        </div>
+        <div id="controls">
+            <div id="detectionsList"></div>
+            <div>
+                סף ביטחון: <input type="range" min="0" max="100" value="50" id="threshold">
+                <span id="thresholdValue">50%</span>
+            </div>
+            <div>
+                בחר מצלמה: 
+                <select id="cameraSelect"></select>
+            </div>
+            <button id="saveButton">שמור תמונה</button>
+            <div id="history">היסטוריית זיהוי:</div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const detectionsList = document.getElementById('detectionsList');
+        const thresholdSlider = document.getElementById('threshold');
+        const thresholdValue = document.getElementById('thresholdValue');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const saveButton = document.getElementById('saveButton');
+        const history = document.getElementById('history');
+        const detectedObjects = new Map();
+
+        const colors = [
+            '#FF6633', '#FFB399', '#FF33FF', '#FFFF99', '#00B3E6', 
+            '#E6B333', '#3366E6', '#999966', '#99FF99', '#B34D4D',
+            '#80B300', '#809900', '#E6B3B3', '#6680B3', '#66991A', 
+            '#FF99E6', '#CCFF1A', '#FF1A66', '#E6331A', '#33FFCC'
+        ];
+
+        const hebrewTranslations = {
+            'person': 'אדם',
+            'bicycle': 'אופניים',
+            'car': 'מכונית',
+            'motorcycle': 'אופנוע',
+            'airplane': 'מטוס',
+            'bus': 'אוטובוס',
+            'train': 'רכבת',
+            'truck': 'משאית',
+            'boat': 'סירה',
+            'traffic light': 'רמזור',
+            'fire hydrant': 'ברז כיבוי',
+            'stop sign': 'תמרור עצור',
+            'parking meter': 'מונה חניה',
+            'bench': 'ספסל',
+            'bird': 'ציפור',
+            'cat': 'חתול',
+            'dog': 'כלב',
+            'horse': 'סוס',
+            'sheep': 'כבשה',
+            'cow': 'פרה',
+            'elephant': 'פיל',
+            'bear': 'דוב',
+            'zebra': 'זברה',
+            'giraffe': 'ג\'ירפה',
+            'backpack': 'תיק גב',
+            'umbrella': 'מטריה',
+            'handbag': 'תיק יד',
+            'tie': 'עניבה',
+            'suitcase': 'מזוודה',
+            'frisbee': 'פריזבי',
+            'skis': 'מגלשיים',
+            'snowboard': 'סנובורד',
+            'sports ball': 'כדור ספורט',
+            'kite': 'עפיפון',
+            'baseball bat': 'מחבט בייסבול',
+            'baseball glove': 'כפפת בייסבול',
+            'skateboard': 'סקייטבורד',
+            'surfboard': 'גלשן',
+            'tennis racket': 'מחבט טניס',
+            'bottle': 'בקבוק',
+            'wine glass': 'כוס יין',
+            'cup': 'כוס',
+            'fork': 'מזלג',
+            'knife': 'סכין',
+            'spoon': 'כף',
+            'bowl': 'קערה',
+            'banana': 'בננה',
+            'apple': 'תפוח',
+            'sandwich': 'כריך',
+            'orange': 'תפוז',
+            'broccoli': 'ברוקולי',
+            'carrot': 'גזר',
+            'hot dog': 'נקניקיה',
+            'pizza': 'פיצה',
+            'donut': 'סופגנייה',
+            'cake': 'עוגה',
+            'chair': 'כיסא',
+            'couch': 'ספה',
+            'potted plant': 'צמח בעציץ',
+            'bed': 'מיטה',
+            'dining table': 'שולחן אוכל',
+            'toilet': 'אסלה',
+            'tv': 'טלוויזיה',
+            'laptop': 'מחשב נייד',
+            'mouse': 'עכבר',
+            'remote': 'שלט',
+            'keyboard': 'מקלדת',
+            'cell phone': 'טלפון נייד',
+            'microwave': 'מיקרוגל',
+            'oven': 'תנור',
+            'toaster': 'טוסטר',
+            'sink': 'כיור',
+            'refrigerator': 'מקרר',
+            'book': 'ספר',
+            'clock': 'שעון',
+            'vase': 'אגרטל',
+            'scissors': 'מספריים',
+            'teddy bear': 'דובי',
+            'hair drier': 'מייבש שיער',
+            'toothbrush': 'מברשת שיניים'
+        };
+
+        function getHebrewName(englishName) {
+            if (hebrewTranslations.hasOwnProperty(englishName)) {
+                return hebrewTranslations[englishName];
+            } else {
+                hebrewTranslations[englishName] = englishName;
+                console.log(`Added new object to translations: ${englishName}`);
+                return englishName;
+            }
+        }
+
+        async function setupCamera(deviceId = null) {
+            const constraints = {
+                video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "user" }
+            };
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            video.srcObject = stream;
+            return new Promise((resolve) => {
+                video.onloadedmetadata = () => {
+                    resolve(video);
+                };
+            });
+        }
+
+        async function loadModel() {
+            const model = await cocoSsd.load();
+            return model;
+        }
+
+        async function detectObjects(model, video) {
+            const predictions = await model.detect(video);
+            return predictions;
+        }
+
+        function speakText(text) {
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'he-IL';
+            window.speechSynthesis.speak(utterance);
+        }
+
+        function updateDetectionsList(predictions) {
+            const currentTime = new Date();
+            const threshold = thresholdSlider.value / 100;
+            
+            predictions.forEach(prediction => {
+                if (prediction.score >= threshold) {
+                    const hebrewName = getHebrewName(prediction.class);
+                    if (!detectedObjects.has(hebrewName)) {
+                        detectedObjects.set(hebrewName, { count: 1, time: currentTime, englishName: prediction.class });
+                        speakText(hebrewName);
+                    } else {
+                        const obj = detectedObjects.get(hebrewName);
+                        obj.count++;
+                        obj.time = currentTime;
+                        detectedObjects.set(hebrewName, obj);
+                    }
+                }
+            });
+
+            const sortedObjects = [...detectedObjects.entries()]
+                .sort((a, b) => b[1].time - a[1].time)
+                .slice(0, 10);
+
+            detectionsList.innerHTML = '';
+            sortedObjects.forEach(([name, obj]) => {
+                const listItem = document.createElement('div');
+                listItem.textContent = `${name}${name !== obj.englishName ? ` (${obj.englishName})` : ''}: ${obj.count} (${obj.time.toLocaleTimeString()})`;
+                detectionsList.appendChild(listItem);
+            });
+        }
+
+        function drawPredictions(predictions) {
+            const threshold = thresholdSlider.value / 100;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            predictions.forEach((prediction, index) => {
+                if (prediction.score >= threshold) {
+                    const [x, y, width, height] = prediction.bbox;
+                    const color = colors[index % colors.length];
+                    const hebrewName = getHebrewName(prediction.class);
+                    
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(x, y, width, height);
+                    
+                    ctx.fillStyle = color;
+                    ctx.font = '16px Arial';
+                    ctx.fillText(`${hebrewName}: ${prediction.score.toFixed(2)}`, x, y > 10 ? y - 5 : 10);
+                }
+            });
+        }
+
+        async function main() {
+            await setupCamera();
+            video.play();
+            
+            const model = await loadModel();
+            console.log('Model loaded');
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
+            async function updateFrame() {
+                const predictions = await detectObjects(model, video);
+                updateDetectionsList(predictions);
+                drawPredictions(predictions);
+                requestAnimationFrame(updateFrame);
+            }
+
+            updateFrame();
+        }
+
+        async function populateCameraOptions() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(device => device.kind === 'videoinput');
+
+            videoDevices.forEach(device => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.text = device.label || `Camera ${cameraSelect.length + 1}`;
+                cameraSelect.appendChild(option);
+            });
+
+            cameraSelect.onchange = async function() {
+                if (video.srcObject) {
+                    video.srcObject.getTracks().forEach(track => track.stop());
+                }
+                await setupCamera(this.value);
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            };
+        }
+
+        function saveImage() {
+            const dataURL = canvas.toDataURL('image/png');
+            const link = document.createElement('a');
+            link.href = dataURL;
+            link.download = `detection-${new Date().toISOString()}.png`;
+            link.click();
+            
+            const historyItem = document.createElement('div');
+            historyItem.textContent = `תמונה נשמרה ב-${new Date().toLocaleTimeString()}`;
+            history.appendChild(historyItem);
+        }
+
+        thresholdSlider.oninput = function() {
+            thresholdValue.textContent = this.value + '%';
+        }
+
+        saveButton.onclick = saveImage;
+        populateCameraOptions();
+        main();
+    </script>
+</body>
+</html>
